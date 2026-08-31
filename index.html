@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Аркада: Уворачивайся и собирай</title>
+    <!-- Подключаем Yandex Games SDK -->
+    <script src="https://yandex.ru/games/sdk/v2"></script>
+    <script src="https://unpkg.com/kaboom@3000/dist/kaboom.js"></script>
+    <style>
+        body { margin: 0; background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; }
+    </style>
+</head>
+<body>
+<script>
+kaboom({
+    width: 800,
+    height: 600,
+    background: [30, 30, 50]
+})
+
+// === YANDEX GAMES SDK ===
+let ysdk = null
+let playerData = null
+
+// Инициализация SDK
+YaGames.init().then(sdk => {
+    ysdk = sdk
+    console.log('Yandex Games SDK инициализирован')
+    
+    // Загружаем данные игрока из облака
+    return sdk.getPlayer({ scopes: false })
+}).then(player => {
+    playerData = player
+    
+    // Пытаемся загрузить сохраненный рекорд
+    return player.getData(['highScore'])
+}).then(data => {
+    if (data.highScore) {
+        highScore = data.highScore
+        console.log('Загружен рекорд из облака:', highScore)
+    }
+}).catch(err => {
+    console.error('Ошибка инициализации SDK:', err)
+})
+
+// Функция показа полноэкранной рекламы
+function showInterstitialAd() {
+    if (!ysdk) return
+    
+    ysdk.adv.showFullscreenAdv({
+        callbacks: {
+            onClose: () => {
+                console.log('Реклама закрыта')
+            },
+            onError: (error) => {
+                console.error('Ошибка показа рекламы:', error)
+            }
+        }
+    })
+}
+
+// Функция показа вознаграждаемой рекламы
+function showRewardedAd(onReward) {
+    if (!ysdk) {
+        // Если SDK не загружен (например, локальный тест), просто даем награду
+        onReward()
+        return
+    }
+    
+    ysdk.adv.showRewardedVideo({
+        callbacks: {
+            onRewarded: () => {
+                console.log('Награда получена!')
+                onReward()
+            },
+            onClose: () => {
+                console.log('Реклама закрыта без награды')
+            },
+            onError: (error) => {
+                console.error('Ошибка показа рекламы:', error)
+            }
+        }
+    })
+}
+
+// Функция сохранения рекорда в облако
+function saveHighScore() {
+    if (!playerData) return
+    
+    playerData.setData({ highScore: highScore }).then(() => {
+        console.log('Рекорд сохранен в облако:', highScore)
+    }).catch(err => {
+        console.error('Ошибка сохранения:', err)
+    })
+}
+
+// === ЗВУКИ ===
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+
+function playSound(frequency, duration, type = 'sine') {
+    const oscillator = audioCtx.createOscillator()
+    const gainNode = audioCtx.createGain()
+    oscillator.connect(gainNode)
+    gainNode.connect(audioCtx.destination)
+    oscillator.frequency.value = frequency
+    oscillator.type = type
+    gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime)
+    gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration)
+    oscillator.start(audioCtx.currentTime)
+    oscillator.stop(audioCtx.currentTime + duration)
+}
+
+function playCoinSound() {
+    playSound(800, 0.1)
+    setTimeout(() => playSound(1000, 0.1), 50)
+}
+
+function playDeathSound() {
+    playSound(200, 0.3, 'sawtooth')
+    setTimeout(() => playSound(100, 0.4, 'sawtooth'), 100)
+}
+
+// === ГЛОБАЛЬНОЕ СОСТОЯНИЕ ===
+let score = 0
+let highScore = 0
+let gameRunning = false
+let difficulty = 1
+let coinTimer = null
+let enemyTimer = null
+let player = null
+let scoreText = null
+let highScoreText = null
+
+// === ГЛОБАЛЬНЫЕ ОБРАБОТЧИКИ ===
+onKeyDown("left", () => {
+    if (player && gameRunning) player.move(-400, 0)
+})
+onKeyDown("right", () => {
+    if (player && gameRunning) player.move(400, 0)
+})
+onKeyDown("up", () => {
+    if (player && gameRunning) player.move(0, -400)
+})
+onKeyDown("down", () => {
+    if (player && gameRunning) player.move(0, 400)
+})
+
+onUpdate("player", (p) => {
+    p.pos.x = clamp(p.pos.x, 0, 800 - 50)
+    p.pos.y = clamp(p.pos.y, 0, 600 - 50)
+})
+
+onUpdate("coin", (coin) => {
+    coin.move(0, coin.speed)
+    if (coin.pos.y > 650) destroy(coin)
+})
+
+onUpdate("enemy", (enemy) => {
+    enemy.move(0, enemy.speed)
+    if (enemy.pos.y > 650) destroy(enemy)
+})
+
+// === ФУНКЦИЯ ЗАПУСКА ИГРЫ ===
+function startGame() {
+    if (coinTimer) coinTimer.cancel()
+    if (enemyTimer) enemyTimer.cancel()
+    
+    destroyAll()
+    
+    score = 0
+    difficulty = 1
+    gameRunning = true
+    
+    player = add([
+        pos(400, 500),
+        rect(50, 50),
+        color(0, 255, 0),
+        area(),
+        outline(4, [255, 255, 255]),
+        "player"
+    ])
+    
+    scoreText = add([
+        text("Очки: " + score),
+        pos(20, 20),
+        color(255, 255, 255)
+    ])
+    
+    highScoreText = add([
+        text("Рекорд: " + highScore),
+        pos(20, 50),
+        color(255, 215, 0)
+    ])
+    
+    coinTimer = loop(0.8, () => {
+        if (!gameRunning) return
+        add([
+            pos(rand(50, 750), -30),
+            circle(20),
+            color(255, 215, 0),
+            area(),
+            outline(3, [255, 255, 255]),
+            "coin",
+            { speed: 200 + difficulty * 20 }
+        ])
+    })
+    
+    enemyTimer = loop(1.2, () => {
+        if (!gameRunning) return
+        add([
+            pos(rand(50, 750), -30),
+            rect(40, 40),
+            color(255, 50, 50),
+            area(),
+            outline(3, [255, 255, 255]),
+            "enemy",
+            { speed: 250 + difficulty * 30 }
+        ])
+    })
+    
+    player.onCollide("coin", (coin) => {
+        destroy(coin)
+        score++
+        scoreText.text = "Очки: " + score
+        playCoinSound()
+        
+        if (score % 5 === 0) {
+            difficulty++
+        }
+    })
+    
+    player.onCollide("enemy", (enemy) => {
+        gameRunning = false
+        playDeathSound()
+        
+        if (score > highScore) {
+            highScore = score
+            saveHighScore() // Сохраняем новый рекорд в облако
+        }
+        
+        if (coinTimer) coinTimer.cancel()
+        if (enemyTimer) enemyTimer.cancel()
+        
+        // Показываем рекламу после смерти
+        showInterstitialAd()
+        
+        showGameOver()
+    })
+}
+
+// === ЭКРАН GAME OVER ===
+function showGameOver() {
+    add([
+        text("GAME OVER"),
+        pos(400, 200),
+        anchor("center"),
+        color(255, 50, 50),
+        scale(2)
+    ])
+    
+    add([
+        text("Очки: " + score),
+        pos(400, 280),
+        anchor("center"),
+        color(255, 255, 255),
+        scale(1.5)
+    ])
+    
+    add([
+        text("Рекорд: " + highScore),
+        pos(400, 330),
+        anchor("center"),
+        color(255, 215, 0),
+        scale(1.2)
+    ])
+    
+    // Кнопка "Продолжить за рекламу"
+    const continueBtn = add([
+        text("📺 Смотри рекламу = продолжи"),
+        pos(400, 400),
+        anchor("center"),
+        color(100, 255, 100),
+        area(),
+        "continueBtn"
+    ])
+    
+    continueBtn.onClick(() => {
+        showRewardedAd(() => {
+            // Если игрок согласился смотреть рекламу - продолжаем игру
+            continueGame()
+        })
+    })
+    
+    add([
+        text("Нажми ПРОБЕЛ для рестарта"),
+        pos(400, 460),
+        anchor("center"),
+        color(200, 200, 200)
+    ])
+}
+
+// Функция продолжения игры после рекламы
+function continueGame() {
+    destroyAll()
+    gameRunning = true
+    
+    player = add([
+        pos(400, 500),
+        rect(50, 50),
+        color(0, 255, 0),
+        area(),
+        outline(4, [255, 255, 255]),
+        "player"
+    ])
+    
+    scoreText = add([
+        text("Очки: " + score),
+        pos(20, 20),
+        color(255, 255, 255)
+    ])
+    
+    highScoreText = add([
+        text("Рекорд: " + highScore),
+        pos(20, 50),
+        color(255, 215, 0)
+    ])
+    
+    // Увеличиваем сложность
+    difficulty++
+    
+    coinTimer = loop(0.8, () => {
+        if (!gameRunning) return
+        add([
+            pos(rand(50, 750), -30),
+            circle(20),
+            color(255, 215, 0),
+            area(),
+            outline(3, [255, 255, 255]),
+            "coin",
+            { speed: 200 + difficulty * 20 }
+        ])
+    })
+    
+    enemyTimer = loop(1.2, () => {
+        if (!gameRunning) return
+        add([
+            pos(rand(50, 750), -30),
+            rect(40, 40),
+            color(255, 50, 50),
+            area(),
+            outline(3, [255, 255, 255]),
+            "enemy",
+            { speed: 250 + difficulty * 30 }
+        ])
+    })
+    
+    player.onCollide("coin", (coin) => {
+        destroy(coin)
+        score++
+        scoreText.text = "Очки: " + score
+        playCoinSound()
+        
+        if (score % 5 === 0) {
+            difficulty++
+        }
+    })
+    
+    player.onCollide("enemy", (enemy) => {
+        gameRunning = false
+        playDeathSound()
+        
+        if (score > highScore) {
+            highScore = score
+            saveHighScore()
+        }
+        
+        if (coinTimer) coinTimer.cancel()
+        if (enemyTimer) enemyTimer.cancel()
+        
+        showInterstitialAd()
+        showGameOver()
+    })
+}
+
+onKeyPress("space", () => {
+    if (!gameRunning) {
+        startGame()
+    }
+})
+
+// === СТАРТОВЫЙ ЭКРАН ===
+add([
+    text("УВОРАЧИВАЙСЯ И СОБИРАЙ"),
+    pos(400, 200),
+    anchor("center"),
+    color(255, 255, 255),
+    scale(1.5)
+])
+
+add([
+    text("🟡 Монетки = очки"),
+    pos(400, 280),
+    anchor("center"),
+    color(255, 215, 0)
+])
+
+add([
+    text("🔴 Враги = смерть"),
+    pos(400, 320),
+    anchor("center"),
+    color(255, 50, 50)
+])
+
+add([
+    text("Управление: стрелки"),
+    pos(400, 380),
+    anchor("center"),
+    color(200, 200, 200)
+])
+
+add([
+    text("Нажми ПРОБЕЛ чтобы начать"),
+    pos(400, 450),
+    anchor("center"),
+    color(100, 255, 100),
+    scale(1.2)
+])
+</script>
+</body>
+</html>
